@@ -639,7 +639,7 @@ END
 END
 
       $write->(File::Spec->catfile('src', 'HomePage.js'), <<'END');
-import React, { useCallback } from "react";
+import React from "react";
 import Table from "react-bootstrap/Table";
 import Button from "react-bootstrap/Button";
 import ButtonToolbar from "react-bootstrap/ButtonToolbar";
@@ -681,9 +681,6 @@ function HomePage({ conversionsStore }) {
     const response = await getJobs();
     conversionsStore.setConversions(response.data);
   };
-  const getConversionJobsCB = useCallback(() => {
-    getConversionJobs();
-  });
   const deleteConversionJob = async id => {
     await deleteJob(id);
     getConversionJobs();
@@ -701,7 +698,7 @@ function HomePage({ conversionsStore }) {
       getConversionJobs();
       setInitialized(true);
     }
-  }, [initialized, getConversionJobsCB, getConversionJobs]);
+  }, [initialized, getConversionJobs]);
   return (
     <div className="page">
       <h1 className="text-center">Convert Video</h1>
@@ -852,18 +849,21 @@ END
       $write->(File::Spec->catfile('src', 'store.js'), <<'END');
 import { observable, action, makeObservable } from "mobx";
 class ConversionsStore {
-  conversions = [];
-  setConversions(conversions) {
-    this.conversions = conversions;
-  }
+    conversions = [];
+    
+    constructor() {
+        makeObservable(this, {
+            conversions: observable,
+            setConversions: action
+        })
+    }
+    
+    setConversions(conversions) {
+        this.conversions = conversions;
+    }
 }
-ConversionsStore = makeObservable(ConversionsStore, {
-  conversions: observable,
-  setConversions: action
-});
 export { ConversionsStore };
 END
-
 
       $write->(File::Spec->catfile('src', 'TopBar.js'), <<'END');
 import React from "react";
