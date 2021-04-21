@@ -207,7 +207,7 @@ sub setup_backend () {
       my $test_nr = 1;
       local $CWD = $dir;
 
-      my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); touch("." . $test_nr++); };
+      my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); };
       
       ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
 
@@ -220,6 +220,7 @@ sub setup_backend () {
               };
               BAIL_OUT("Can not run '@cmd': $@")
                   if ($@);
+              touch("." . $test_nr++);
           }
           $ok->(1, "Command '@cmd' executed");
       };
@@ -233,7 +234,7 @@ sub setup_backend () {
 
           debug("write '$file' in '" . getcwd() . "'");
           
-          if (! -f ".$test_nr") {
+          if (! -f $file) {
               my $fh = IO::File->new($file, "w");
       
               print $fh $str;
@@ -264,8 +265,9 @@ END
 END
               }
           }
-
+          
           $write->($file, join('', @lines));
+          touch("." . $test_nr++);
       }
 
       $cmd->('npm', 'install', '--save-dev', 'sequelize-cli');
@@ -558,7 +560,7 @@ sub setup_frontend () {
 
     my $test_nr = 1; # number of tests in this block
     
-    my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); touch("." . $test_nr++); };
+    my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); };
     
     my $cmd = sub {
         my @cmd = @_;
@@ -569,6 +571,7 @@ sub setup_frontend () {
             };
             BAIL_OUT("Can not run '@cmd': $@")
                 if ($@);
+            touch("." . $test_nr++);
         }
         $ok->(1, "Command '@cmd' executed");
     };
@@ -587,7 +590,7 @@ sub setup_frontend () {
       my $write = sub {
           my ($file, $str) = @_;
           
-          if (! -f ".$test_nr") {
+          if (! -f $file) {
               my $fh = IO::File->new($file, "w");
       
               print $fh $str;
@@ -636,7 +639,7 @@ END
 END
 
       $write->(File::Spec->catfile('src', 'HomePage.js'), <<'END');
-import React from "react";
+import React, { useCallback } from "react";
 import Table from "react-bootstrap/Table";
 import Button from "react-bootstrap/Button";
 import ButtonToolbar from "react-bootstrap/ButtonToolbar";
@@ -678,6 +681,9 @@ function HomePage({ conversionsStore }) {
     const response = await getJobs();
     conversionsStore.setConversions(response.data);
   };
+  const getConversionJobsCB = useCallback(() => {
+    getConversionJobs();
+  });
   const deleteConversionJob = async id => {
     await deleteJob(id);
     getConversionJobs();
@@ -695,7 +701,7 @@ function HomePage({ conversionsStore }) {
       getConversionJobs();
       setInitialized(true);
     }
-  });
+  }, [initialized, getConversionJobsCB, getConversionJobs]);
   return (
     <div className="page">
       <h1 className="text-center">Convert Video</h1>
@@ -844,14 +850,14 @@ export const startJob = id => axios.get(`${APIURL}/conversions/start/${id}`);
 END
 
       $write->(File::Spec->catfile('src', 'store.js'), <<'END');
-import { observable, action, decorate } from "mobx";
+import { observable, action, makeObservable } from "mobx";
 class ConversionsStore {
   conversions = [];
   setConversions(conversions) {
     this.conversions = conversions;
   }
 }
-ConversionsStore = decorate(ConversionsStore, {
+ConversionsStore = makeObservable(ConversionsStore, {
   conversions: observable,
   setConversions: action
 });
