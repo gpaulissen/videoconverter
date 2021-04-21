@@ -69,7 +69,6 @@ use English qw( -no_match_vars ) ;
 use Cwd qw(abs_path getcwd);
 use File::Basename;
 use File::Copy;
-use File::Find;
 use File::Find::Rule;
 use File::Path qw(make_path remove_tree);
 use File::Spec;
@@ -102,6 +101,7 @@ sub setup_backend ();
 sub setup_frontend ();
 sub execute ($$$);
 sub check_status ($$);
+sub debug (@);
 
 # MAIN
 
@@ -207,7 +207,7 @@ sub setup_backend () {
       my $test_nr = 1;
       local $CWD = $dir;
 
-      my $ok = sub { ok(@_); touch("." . $test_nr++); };
+      my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); touch("." . $test_nr++); };
       
       ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
 
@@ -221,7 +221,7 @@ sub setup_backend () {
               BAIL_OUT("Can not run '@cmd': $@")
                   if ($@);
           }
-          $ok->(1, "@cmd executed");
+          $ok->(1, "Command '@cmd' executed");
       };
 
       $cmd->('npx', 'express-generator');
@@ -230,6 +230,8 @@ sub setup_backend () {
 
       my $write = sub {
           my ($file, $str) = @_;
+
+          debug("write '$file' in '" . getcwd() . "'");
           
           if (! -f ".$test_nr") {
               my $fh = IO::File->new($file, "w");
@@ -238,7 +240,7 @@ sub setup_backend () {
 
               $fh->close();
           }
-          $ok->(-f $file, "$file created");
+          $ok->(-f $file, "File '$file' created");
       };
 
       $write->('.babelrc', <<'END');
@@ -291,7 +293,7 @@ END
       # find the migration script
       my @files = File::Find::Rule->file()->name('*-create-video-conversion.js')->in('migrations');
 
-      $ok->(@files == 1, "File $files[0] found");
+      $ok->(@files == 1, "File '$files[0]' found");
 
       $write->($files[0], <<'END');      
 "use strict";
@@ -360,7 +362,7 @@ END
       # create the database
       $cmd->('npx', 'sequelize-cli', 'db:migrate');
       
-      my $dir = sub { my ($dir) = @_; mkdir($dir) unless -d $dir; $ok->(-d $dir, "$dir exists"); };
+      my $dir = sub { my ($dir) = @_; mkdir($dir) unless -d $dir; $ok->(-d $dir, "Directory '$dir' exists"); };
 
       $dir->('files');
       $dir->('queues');
@@ -421,8 +423,8 @@ END
           $cmd->('sudo', 'apt-get', 'update');
           $cmd->('sudo', 'apt-get', 'upgrade');
           $cmd->('sudo', 'apt-get', 'install', 'redis-server');
+          $cmd->('redis-server');
       }
-      $cmd->('redis-server');
 
       $write->(File::Spec->catfile('routes', 'conversions.js'), <<'END');
 var express = require("express");
@@ -531,30 +533,402 @@ END
           my $ext = ($^O eq 'MSWin32' ? '.exe' : '');
 
           my @ffmpeg = File::Find::Rule->file()->name("ffmpeg$ext")->in($root);
-          my @ffprobe = File::Find::Rule->file()->name("ffprobe$ext")->in($root);
+          my @ffprobe = File::Find::Rule->file()->name("ffprobe$ext")->in('node_modules'); # ffprobe-static installs here
 
-          $ok->(@ffmpeg > 0, "Executable ffmpeg ($ffmpeg[0]) found");
-          $ok->(@ffprobe > 0, "Executable ffprobe ($ffprobe[0]) found");
+          print STDERR "@ffmpeg\n";
+          print STDERR "@ffprobe\n";
           
+          $ok->(@ffmpeg > 0, "Executable ffmpeg found");
+          $ok->(@ffprobe > 0, "Executable ffprobe found");
+
+          my $ffmpeg = File::Spec->canonpath($ffmpeg[$#ffmpeg]);
+          my $ffprobe = File::Spec->canonpath($ffprobe[$#ffprobe]); # use latest since on Windows there is a ia32 and x64 variant
+
           $write->('.env', <<"END");
-FFMPEG_PATH='$ffmpeg[0]'
-FFPROBE_PATH='$ffprobe[0]'
+FFMPEG_PATH='$ffmpeg'
+FFPROBE_PATH='$ffprobe'
 END
       }
+      $ok->(-f ".env", "File '.env' exists");
     }
 }
 
-sub setup_frontend (){
+sub setup_frontend () {
     my $dir = 'frontend';
+
+    my $test_nr = 1; # number of tests in this block
     
-    mkdir($dir)
-        unless -d $dir;
+    my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); touch("." . $test_nr++); };
     
+    my $cmd = sub {
+        my @cmd = @_;
+        
+        if (! -f ".$test_nr") {
+            eval {
+                execute(undef, undef, \@cmd);
+            };
+            BAIL_OUT("Can not run '@cmd': $@")
+                if ($@);
+        }
+        $ok->(1, "Command '@cmd' executed");
+    };
+
+    if (! -d $dir) {
+        $cmd->('npx', 'create-react-app', 'frontend');
+    }
+        
   SKIP: {
-      my $tests = 1; # number of tests in this block
       local $CWD = $dir;
 
       ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
+
+      $cmd->('npm', 'i', 'axios', 'bootstrap', 'formik', 'mobx', 'mobx-react', 'react-bootstrap', 'react-router-dom');
+
+      my $write = sub {
+          my ($file, $str) = @_;
+          
+          if (! -f ".$test_nr") {
+              my $fh = IO::File->new($file, "w");
+      
+              print $fh $str;
+
+              $fh->close();
+          }
+          $ok->(-f $file, "File '$file' created");
+      };
+      
+      $write->(File::Spec->catfile('src', 'App.js'), <<'END');
+import React from "react";
+import { Router, Route } from "react-router-dom";
+import "./App.css";
+import { createBrowserHistory as createHistory } from "history";
+import HomePage from "./HomePage";
+import { ConversionsStore } from "./store";
+import TopBar from "./TopBar";
+const conversionsStore = new ConversionsStore();
+const history = createHistory();
+function App() {
+  return (
+    <div className="App">
+      <TopBar />
+      <Router history={history}>
+        <Route
+          path="/"
+          exact
+          component={props => (
+            <HomePage {...props} conversionsStore={conversionsStore} />
+          )}
+        />
+      </Router>
+    </div>
+  );
+}
+export default App;
+END
+
+      $write->(File::Spec->catfile('src', 'App.css'), <<'END');
+.page {
+  padding: 20px;
+}
+.button {
+  margin-right: 10px;
+}
+END
+
+      $write->(File::Spec->catfile('src', 'HomePage.js'), <<'END');
+import React from "react";
+import Table from "react-bootstrap/Table";
+import Button from "react-bootstrap/Button";
+import ButtonToolbar from "react-bootstrap/ButtonToolbar";
+import { observer } from "mobx-react";
+import {
+  getJobs,
+  addJob,
+  deleteJob,
+  cancel,
+  startJob,
+  APIURL
+} from "./request";
+import { Formik } from "formik";
+import Form from "react-bootstrap/Form";
+import Col from "react-bootstrap/Col";
+function HomePage({ conversionsStore }) {
+  const fileRef = React.createRef();
+  const [file, setFile] = React.useState(null);
+  const [fileName, setFileName] = React.useState("");
+  const [initialized, setInitialized] = React.useState(false);
+  const onChange = event => {
+    setFile(event.target.files[0]);
+    setFileName(event.target.files[0].name);
+  };
+  const openFileDialog = () => {
+    fileRef.current.click();
+  };
+  const handleSubmit = async evt => {
+    if (!file) {
+      return;
+    }
+    let bodyFormData = new FormData();
+    bodyFormData.set("outputFormat", evt.outputFormat);
+    bodyFormData.append("video", file);
+    await addJob(bodyFormData);
+    getConversionJobs();
+  };
+  const getConversionJobs = async () => {
+    const response = await getJobs();
+    conversionsStore.setConversions(response.data);
+  };
+  const deleteConversionJob = async id => {
+    await deleteJob(id);
+    getConversionJobs();
+  };
+  const cancelConversionJob = async id => {
+    await cancel(id);
+    getConversionJobs();
+  };
+  const startConversionJob = async id => {
+    await startJob(id);
+    getConversionJobs();
+  };
+  React.useEffect(() => {
+    if (!initialized) {
+      getConversionJobs();
+      setInitialized(true);
+    }
+  });
+  return (
+    <div className="page">
+      <h1 className="text-center">Convert Video</h1>
+      <Formik onSubmit={handleSubmit} initialValues={{ outputFormat: "mp4" }}>
+        {({
+          handleSubmit,
+          handleChange,
+          handleBlur,
+          values,
+          touched,
+          isInvalid,
+          errors
+        }) => (
+          <Form noValidate onSubmit={handleSubmit}>
+            <Form.Row>
+              <Form.Group
+                as={Col}
+                md="12"
+                controlId="outputFormat"
+                defaultValue="mp4"
+              >
+                <Form.Label>Output Format</Form.Label>
+                <Form.Control
+                  as="select"
+                  value={values.outputFormat || "mp4"}
+                  onChange={handleChange}
+                  isInvalid={touched.outputFormat && errors.outputFormat}
+                >
+                  <option value="mov">mov</option>
+                  <option value="webm">webm</option>
+                  <option value="mp4">mp4</option>
+                  <option value="mpeg">mpeg</option>
+                  <option value="3gp">3gp</option>
+                </Form.Control>
+                <Form.Control.Feedback type="invalid">
+                  {errors.outputFormat}
+                </Form.Control.Feedback>
+              </Form.Group>
+            </Form.Row>
+            <Form.Row>
+              <Form.Group as={Col} md="12" controlId="video">
+                <input
+                  type="file"
+                  style={{ display: "none" }}
+                  ref={fileRef}
+                  onChange={onChange}
+                  name="video"
+                />
+                <ButtonToolbar>
+                  <Button
+                    className="button"
+                    onClick={openFileDialog}
+                    type="button"
+                  >
+                    Upload
+                  </Button>
+                  <span>{fileName}</span>
+                </ButtonToolbar>
+              </Form.Group>
+            </Form.Row>
+            <Button type="submit">Add Job</Button>
+          </Form>
+        )}
+      </Formik>
+      <br />
+      <Table>
+        <thead>
+          <tr>
+            <th>File Name</th>
+            <th>Converted File</th>
+            <th>Output Format</th>
+            <th>Status</th>
+            <th>Start</th>
+            <th>Cancel</th>
+            <th>Delete</th>
+          </tr>
+        </thead>
+        <tbody>
+          {conversionsStore.conversions.map(c => {
+            return (
+              <tr>
+                <td>{c.filePath}</td>
+                <td>{c.status}</td>
+                <td>{c.outputFormat}</td>
+                <td>
+                  {c.convertedFilePath ? (
+                    <a href={`${APIURL}/${c.convertedFilePath}`}>Open</a>
+                  ) : (
+                    "Not Available"
+                  )}
+                </td>
+                <td>
+                  <Button
+                    className="button"
+                    type="button"
+                    onClick={startConversionJob.bind(this, c.id)}
+                  >
+                    Start
+                  </Button>
+                </td>
+                <td>
+                  <Button
+                    className="button"
+                    type="button"
+                    onClick={cancelConversionJob.bind(this, c.id)}
+                  >
+                    Cancel
+                  </Button>
+                </td>
+                <td>
+                  <Button
+                    className="button"
+                    type="button"
+                    onClick={deleteConversionJob.bind(this, c.id)}
+                  >
+                    Delete
+                  </Button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </Table>
+    </div>
+  );
+}
+export default observer(HomePage);
+END
+
+
+      $write->(File::Spec->catfile('src', 'request.js'), <<'END');
+const axios = require("axios");
+export const APIURL = "http://localhost:3000";
+export const getJobs = () => axios.get(`${APIURL}/conversions`);
+export const addJob = data =>
+  axios({
+    method: "post",
+    url: `${APIURL}/conversions`,
+    data,
+    config: { headers: { "Content-Type": "multipart/form-data" } }
+  });
+export const cancel = id => axios.put(`${APIURL}/conversions/cancel/${id}`, {});
+export const deleteJob = id =>
+  axios.delete(`${APIURL}/conversions/${id}`);
+export const startJob = id => axios.get(`${APIURL}/conversions/start/${id}`);
+END
+
+      $write->(File::Spec->catfile('src', 'store.js'), <<'END');
+import { observable, action, decorate } from "mobx";
+class ConversionsStore {
+  conversions = [];
+  setConversions(conversions) {
+    this.conversions = conversions;
+  }
+}
+ConversionsStore = decorate(ConversionsStore, {
+  conversions: observable,
+  setConversions: action
+});
+export { ConversionsStore };
+END
+
+
+      $write->(File::Spec->catfile('src', 'TopBar.js'), <<'END');
+import React from "react";
+import Navbar from "react-bootstrap/Navbar";
+import Nav from "react-bootstrap/Nav";
+function TopBar() {
+  return (
+    <Navbar bg="primary" expand="lg" variant="dark">
+      <Navbar.Brand href="#home">Video Converter</Navbar.Brand>
+      <Navbar.Toggle aria-controls="basic-navbar-nav" />
+      <Navbar.Collapse id="basic-navbar-nav">
+        <Nav className="mr-auto">
+          <Nav.Link href="/">Home</Nav.Link>
+        </Nav>
+      </Navbar.Collapse>
+    </Navbar>
+  );
+}
+export default TopBar;
+END
+
+      $write->(File::Spec->catfile('public', 'index.html'), <<'END');
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="Web site created using create-react-app"
+    />
+    <link rel="apple-touch-icon" href="logo192.png" />
+    <!--
+      manifest.json provides metadata used when your web app is installed on a
+      user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
+    -->
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <!--
+      Notice the use of %PUBLIC_URL% in the tags above.
+      It will be replaced with the URL of the `public` folder during the build.
+      Only files inside the `public` folder can be referenced from the HTML.
+Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
+      work correctly both with client-side routing and a non-root public URL.
+      Learn how to configure a non-root public URL by running `npm run build`.
+    -->
+    <title>Video Converter</title>
+    <link
+      rel="stylesheet"
+      href="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css"
+      integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T"
+      crossorigin="anonymous"
+    />
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <!--
+      This HTML file is a template.
+      If you open it directly in the browser, you will see an empty page.
+You can add webfonts, meta tags, or analytics to this file.
+      The build step will place the bundled scripts into the <body> tag.
+To begin the development, run `npm start` or `yarn start`.
+      To create a production bundle, use `npm run build` or `yarn build`.
+    -->
+  </body>
+</html>
+END
+
+      $cmd->('npm', 'i', '-g', 'nodemon');
     }
 }
 
@@ -610,3 +984,12 @@ sub check_status ($$) {
         }
     }
 }
+
+sub debug (@) {
+    print STDERR "@_\n"
+        if $verbose > 0;
+}
+
+
+
+

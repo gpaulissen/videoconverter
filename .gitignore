@@ -1,3 +1,10 @@
+## Project specific .gitignore
+
+backend
+frontend
+
+## Standard Node .gitignore
+
 # Logs
 logs
 *.log
