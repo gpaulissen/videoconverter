@@ -1,7 +1,9 @@
 ## Project specific .gitignore
 
-backend
-frontend
+/backend
+.backend
+/frontend
+.frontend
 
 ## Standard Node .gitignore
 

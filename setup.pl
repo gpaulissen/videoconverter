@@ -81,6 +81,8 @@ use Pod::Usage;
 use warnings;
 use Carp qw(croak);
 use Test::More; # do not know how many in advance
+use Data::Dumper;
+use Storable qw(retrieve store);
 
 # VARIABLES
 
@@ -101,6 +103,8 @@ sub setup_backend ();
 sub setup_frontend ();
 sub execute ($$$);
 sub check_status ($$);
+sub cmd ($@);
+sub update_file ($$$;$);
 sub debug (@);
 
 # MAIN
@@ -198,744 +202,180 @@ sub check_npm () {
 }
 
 sub setup_backend () {
-    my $dir = 'backend';
+    my $dir = 'backend';    
+    my $cache_file = File::Spec->rel2abs('.' . $dir);
+    my %cache = ();
+    my $r_cache = \%cache;
+
+    # beware of removing cache if the directory is not there (anymore)
+    unlink($cache_file)
+        if (-f $cache_file && ! -d $dir);
+
+    if (-f $cache_file) {
+        $r_cache = retrieve($cache_file);
+    }
     
     mkdir($dir)
         unless -d $dir;
+
+    eval {
     
-  SKIP: {
-      my $test_nr = 1;
-      local $CWD = $dir;
+      SKIP: {
+          local $CWD = $dir;
 
-      my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); };
-      
-      ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
+          ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
 
-      my $cmd = sub {
-          my @cmd = @_;
+          cmd($r_cache, 'npx', 'express-generator');
+          cmd($r_cache, 'npm', 'install');
+          cmd($r_cache, 'npm', 'i', '@babel/cli', '@babel/core', '@babel/node', '@babel/preset-env', 'bull', 'cors', 'dotenv', 'fluent-ffmpeg', 'ffprobe-static', 'multer' , 'sequelize', 'sqlite3');
+
+          update_file($r_cache, '.', '.babelrc');
+
+          my $file = File::Spec->catfile('.', 'package.json');
           
-          if (! -f ".$test_nr") {
-              eval {
-                  execute(undef, undef, \@cmd);
-              };
-              BAIL_OUT("Can not run '@cmd': $@")
-                  if ($@);
-              touch("." . $test_nr++);
-          }
-          $ok->(1, "Command '@cmd' executed");
-      };
+          if (!exists($r_cache->{'file'}{$file})) {
+              my $fh = IO::File->new($file, "r");
+              my @lines = <$fh>;
 
-      $cmd->('npx', 'express-generator');
-      $cmd->('npm', 'install');
-      $cmd->('npm', 'i', '@babel/cli', '@babel/core', '@babel/node', '@babel/preset-env', 'bull', 'cors', 'dotenv', 'fluent-ffmpeg', 'ffprobe-static', 'multer' , 'sequelize', 'sqlite3');
-
-      my $write = sub {
-          my ($file, $str) = @_;
-
-          debug("write '$file' in '" . getcwd() . "'");
-          
-          if (! -f $file) {
-              my $fh = IO::File->new($file, "w");
-      
-              print $fh $str;
-
-              $fh->close();
-          }
-          $ok->(-f $file, "File '$file' created");
-      };
-
-      $write->('.babelrc', <<'END');
-{
-    "presets": [
-        "@babel/preset-env"
-    ]
-}
-END
-
-      if (! -f ".$test_nr") {
-          my $file = 'package.json';
-          my $fh = IO::File->new($file, "r");
-          my @lines = <$fh>;
-
-          for my $i (0 .. $#lines) {
-              if ($lines[$i] =~ m!^    "start": "node ./bin/www"$!) {
-                  $lines[$i] = <<'END';
+              for my $i (0 .. $#lines) {
+                  if ($lines[$i] =~ m!^    "start": "node ./bin/www"$!) {
+                      $lines[$i] = <<'END';
     "start": "nodemon --exec npm run babel-node --  ./bin/www",
     "babel-node": "babel-node"
 END
+                  }
               }
+
+              $fh = IO::File->new($file, "w");
+              
+              print $fh join('', @lines);
+
+              $fh->close();
+              $r_cache->{'file'}{$file} = 1;
           }
+
+          cmd($r_cache, 'npm', 'install', '--save-dev', 'sequelize-cli');
+          cmd($r_cache, 'npx', 'sequelize', 'init');
+
+          update_file($r_cache, 'config', 'config.json');
+
+          cmd($r_cache, 'npx', 'sequelize-cli', '--name', 'VideoConversion', '--attributes', 'filePath:string,convertedFilePath:string,outputFormat:string,status:enum', 'model:generate');
+
+          # find the migration script
+          my @files = File::Find::Rule->file()->name('*-create-video-conversion.js')->in('migrations');
+
+          ok(@files == 1, "File '$files[0]' found");
+
+          update_file($r_cache, 'migrations', basename($files[0]), 'create-video-conversion.js');
           
-          $write->($file, join('', @lines));
-          touch("." . $test_nr++);
-      }
+          update_file($r_cache, 'models', 'videoconversion.js');
 
-      $cmd->('npm', 'install', '--save-dev', 'sequelize-cli');
-      $cmd->('npx', 'sequelize', 'init');
-
-      $write->(File::Spec->catfile('config', 'config.json'), <<'END');
-{
-  "development": {
-    "dialect": "sqlite",
-    "storage": "development.db"
-  },
-  "test": {
-    "dialect": "sqlite",
-    "storage": "test.db"
-  },
-  "production": {
-    "dialect": "sqlite",
-    "storage": "production.db"
-  }
-}
-END
-
-      $cmd->('npx', 'sequelize-cli', '--name', 'VideoConversion', '--attributes', 'filePath:string,convertedFilePath:string,outputFormat:string,status:enum', 'model:generate');
-
-      # find the migration script
-      my @files = File::Find::Rule->file()->name('*-create-video-conversion.js')->in('migrations');
-
-      $ok->(@files == 1, "File '$files[0]' found");
-
-      $write->($files[0], <<'END');      
-"use strict";
-module.exports = {
-  up: (queryInterface, Sequelize) => {
-    return queryInterface.createTable("VideoConversions", {
-      id: {
-        allowNull: false,
-        autoIncrement: true,
-        primaryKey: true,
-        type: Sequelize.INTEGER
-      },
-      filePath: {
-        type: Sequelize.STRING
-      },
-      convertedFilePath: {
-        type: Sequelize.STRING
-      },
-      outputFormat: {
-        type: Sequelize.STRING
-      },
-      status: {
-        type: Sequelize.ENUM,
-        values: ["pending", "done", "cancelled"],
-        defaultValue: "pending"
-      },
-      createdAt: {
-        allowNull: false,
-        type: Sequelize.DATE
-      },
-      updatedAt: {
-        allowNull: false,
-        type: Sequelize.DATE
-      }
-    });
-  },
-  down: (queryInterface, Sequelize) => {
-    return queryInterface.dropTable("VideoConversions");
-  }
-};
-END
-      
-      $write->(File::Spec->catfile('models', 'videoconversion.js'), <<'END');
-"use strict";
-module.exports = (sequelize, DataTypes) => {
-  const VideoConversion = sequelize.define(
-    "VideoConversion",
-    {
-      filePath: DataTypes.STRING,
-      convertedFilePath: DataTypes.STRING,
-      outputFormat: DataTypes.STRING,
-      status: {
-        type: DataTypes.ENUM("pending", "done", "cancelled"),
-        defaultValue: "pending"
-      }
-    },
-    {}
-  );
-  VideoConversion.associate = function(models) {
-    // associations can be defined here
-  };
-  return VideoConversion;
-};
-END
-
-      # create the database
-      $cmd->('npx', 'sequelize-cli', 'db:migrate');
-      
-      my $dir = sub { my ($dir) = @_; mkdir($dir) unless -d $dir; $ok->(-d $dir, "Directory '$dir' exists"); };
-
-      $dir->('files');
-      $dir->('queues');
-
-      $write->(File::Spec->catfile('queues', 'videoQueue.js'), <<'END');
-const Queue = require("bull");
-const videoQueue = new Queue("video transcoding");
-const models = require("../models");
-var ffmpeg = require("fluent-ffmpeg");
-const fs = require("fs");
-const convertVideo = (path, format) => {
-  const fileName = path.replace(/\.[^/.]+$/, "");
-  const convertedFilePath = `${fileName}_${+new Date()}.${format}`;
-  return new Promise((resolve, reject) => {
-    ffmpeg(`${__dirname}/../files/${path}`)
-      .setFfmpegPath(process.env.FFMPEG_PATH)
-      .setFfprobePath(process.env.FFPROBE_PATH)
-      .toFormat(format)
-      .on("start", commandLine => {
-        console.log(`Spawned Ffmpeg with command: ${commandLine}`);
-      })
-      .on("error", (err, stdout, stderr) => {
-        console.log(err, stdout, stderr);
-        reject(err);
-      })
-      .on("end", (stdout, stderr) => {
-        console.log(stdout, stderr);
-        resolve({ convertedFilePath });
-      })
-      .saveToFile(`${__dirname}/../files/${convertedFilePath}`);
-  });
-};
-videoQueue.process(async job => {
-  const { id, path, outputFormat } = job.data;
-  try {
-    const conversions = await models.VideoConversion.findAll({ where: { id } });
-    const conv = conversions[0];
-    if (conv.status == "cancelled") {
-      return Promise.resolve();
-    }
-    const pathObj = await convertVideo(path, outputFormat);
-    const convertedFilePath = pathObj.convertedFilePath;
-    const conversion = await models.VideoConversion.update(
-      { convertedFilePath, status: "done" },
-      {
-        where: { id }
-      }
-    );
-    Promise.resolve(conversion);
-  } catch (error) {
-    Promise.reject(error);
-  }
-});
-export { videoQueue };
-END
-
-      if ($^O eq 'linux') {
-          $cmd->('sudo', 'apt-get', 'update');
-          $cmd->('sudo', 'apt-get', 'upgrade');
-          $cmd->('sudo', 'apt-get', 'install', 'redis-server');
-          $cmd->('redis-server');
-      }
-
-      $write->(File::Spec->catfile('routes', 'conversions.js'), <<'END');
-var express = require("express");
-var router = express.Router();
-const models = require("../models");
-var multer = require("multer");
-const fs = require("fs").promises;
-const path = require("path");
-import { videoQueue } from "../queues/videoQueue";
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "./files");
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${+new Date()}_${file.originalname}`);
-  }
-});
-const upload = multer({ storage });
-router.get("/", async (req, res, next) => {
-  const conversions = await models.VideoConversion.findAll();
-  res.json(conversions);
-});
-router.post("/", upload.single("video"), async (req, res, next) => {
-  const data = { ...req.body, filePath: req.file.path };
-  const conversion = await models.VideoConversion.create(data);
-  res.json(conversion);
-});
-router.delete("/:id", async (req, res, next) => {
-  const id = req.params.id;
-  const conversions = await models.VideoConversion.findAll({ where: { id } });
-  const conversion = conversions[0];
-  try {
-    await fs.unlink(`${__dirname}/../${conversion.filePath}`);
-    if (conversion.convertedFilePath) {
-      await fs.unlink(`${__dirname}/../files/${conversion.convertedFilePath}`);
-    }
-  } catch (error) {
-  } finally {
-    await models.VideoConversion.destroy({ where: { id } });
-    res.json({});
-  }
-});
-router.put("/cancel/:id", async (req, res, next) => {
-  const id = req.params.id;
-  const conversion = await models.VideoConversion.update(
-    { status: "cancelled" },
-    {
-      where: { id }
-    }
-  );
-  res.json(conversion);
-});
-router.get("/start/:id", async (req, res, next) => {
-  const id = req.params.id;
-  const conversions = await models.VideoConversion.findAll({ where: { id } });
-  const conversion = conversions[0];
-  const outputFormat = conversion.outputFormat;
-  const filePath = path.basename(conversion.filePath);
-  await videoQueue.add({ id, path: filePath, outputFormat });
-  res.json({});
-});
-module.exports = router;
-END
-
-      $write->('app.js', <<'END');
-require("dotenv").config();
-var createError = require("http-errors");
-var express = require("express");
-var path = require("path");
-var cookieParser = require("cookie-parser");
-var logger = require("morgan");
-var cors = require("cors");
-var indexRouter = require("./routes/index");
-var conversionsRouter = require("./routes/conversions");
-var app = express();
-// view engine setup
-app.set("views", path.join(__dirname, "views"));
-app.set("view engine", "jade");
-app.use(logger("dev"));
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser());
-app.use(express.static(path.join(__dirname, "public")));
-app.use(express.static(path.join(__dirname, "files")));
-app.use(cors());
-app.use("/", indexRouter);
-app.use("/conversions", conversionsRouter);
-// catch 404 and forward to error handler
-app.use(function(req, res, next) {
-  next(createError(404));
-});
-// error handler
-app.use(function(err, req, res, next) {
-  // set locals, only providing error in development
-  res.locals.message = err.message;
-  res.locals.error = req.app.get("env") === "development" ? err : {};
-// render the error page
-  res.status(err.status || 500);
-  res.render("error");
-});
-module.exports = app;
-END
-
-      if (! -f ".env") {
-          my $root = ($^O eq 'MSWin32' ? $ENV{'USERPROFILE'} : '/');
-          my $ext = ($^O eq 'MSWin32' ? '.exe' : '');
-
-          my @ffmpeg = File::Find::Rule->file()->name("ffmpeg$ext")->in($root);
-          my @ffprobe = File::Find::Rule->file()->name("ffprobe$ext")->in('node_modules'); # ffprobe-static installs here
-
-          print STDERR "@ffmpeg\n";
-          print STDERR "@ffprobe\n";
+          # create the database
+          cmd($r_cache, 'npx', 'sequelize-cli', 'db:migrate');
           
-          $ok->(@ffmpeg > 0, "Executable ffmpeg found");
-          $ok->(@ffprobe > 0, "Executable ffprobe found");
+          create_directory($r_cache, 'files');
+          create_directory($r_cache, 'queues');
 
-          my $ffmpeg = File::Spec->canonpath($ffmpeg[$#ffmpeg]);
-          my $ffprobe = File::Spec->canonpath($ffprobe[$#ffprobe]); # use latest since on Windows there is a ia32 and x64 variant
+          update_file($r_cache, 'queues', 'videoQueue.js');
 
-          $write->('.env', <<"END");
+          if ($^O eq 'linux') {
+              cmd($r_cache, 'sudo', 'apt-get', 'update');
+              cmd($r_cache, 'sudo', 'apt-get', 'upgrade');
+              cmd($r_cache, 'sudo', 'apt-get', 'install', 'redis-server');
+              cmd($r_cache, 'redis-server');
+          }
+
+          update_file($r_cache, 'routes', 'conversions.js');
+
+          update_file($r_cache, '.', 'app.js');
+
+          $file = File::Spec->catfile('.', '.env');
+          
+          if (!exists($r_cache->{'file'}{$file})) {          
+              if (! -f $file) {
+                  my $root = ($^O eq 'MSWin32' ? $ENV{'USERPROFILE'} : '/');
+                  my $ext = ($^O eq 'MSWin32' ? '.exe' : '');
+
+                  my @ffmpeg = File::Find::Rule->file()->name("ffmpeg$ext")->in($root);
+                  my @ffprobe = File::Find::Rule->file()->name("ffprobe$ext")->in('node_modules'); # ffprobe-static installs here
+
+                  print STDERR "@ffmpeg\n";
+                  print STDERR "@ffprobe\n";
+                  
+                  ok(@ffmpeg > 0, "Executable ffmpeg found");
+                  ok(@ffprobe > 0, "Executable ffprobe found");
+
+                  my $ffmpeg = File::Spec->canonpath($ffmpeg[$#ffmpeg]);
+                  my $ffprobe = File::Spec->canonpath($ffprobe[$#ffprobe]); # use latest since on Windows there is a ia32 and x64 variant
+
+                  my $fh = IO::File->new($file, "w");
+                  
+                  print $fh <<"END";
 FFMPEG_PATH='$ffmpeg'
 FFPROBE_PATH='$ffprobe'
 END
-      }
-      $ok->(-f ".env", "File '.env' exists");
-    }
+
+                  $fh->close();
+              }
+              $r_cache->{'file'}{$file} = 1;              
+          }
+          ok(-f $file, "File '$file' exists");
+        }
+    };
+    
+    store($r_cache, $cache_file);
+
+    die $@
+        if $@;
 }
 
 sub setup_frontend () {
     my $dir = 'frontend';
+    my $cache_file = File::Spec->rel2abs('.' . $dir);
+    my %cache = ();
+    my $r_cache = \%cache;
 
-    my $test_nr = 1; # number of tests in this block
+    # beware of removing cache if the directory is not there (anymore)
+    unlink($cache_file)
+        if (-f $cache_file && ! -d $dir);
+
+    if (-f $cache_file) {
+        $r_cache = retrieve($cache_file);
+    }
+
+    eval {
     
-    my $ok = sub { my ($result, $msg) = @_; ok($result, $msg); };
-    
-    my $cmd = sub {
-        my @cmd = @_;
-        
-        if (! -f ".$test_nr") {
-            eval {
-                execute(undef, undef, \@cmd);
-            };
-            BAIL_OUT("Can not run '@cmd': $@")
-                if ($@);
-            touch("." . $test_nr++);
+        if (! -d $dir) {
+            cmd($r_cache, 'npx', 'create-react-app', 'frontend');
         }
-        $ok->(1, "Command '@cmd' executed");
-    };
-
-    if (! -d $dir) {
-        $cmd->('npx', 'create-react-app', 'frontend');
-    }
         
-  SKIP: {
-      local $CWD = $dir;
+      SKIP: {
+          local $CWD = $dir;
 
-      ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
+          ok(getcwd() =~ m/$dir$/, "Now in $dir directory");
 
-      $cmd->('npm', 'i', 'axios', 'bootstrap', 'formik', 'mobx', 'mobx-react', 'react-bootstrap', 'react-router-dom');
+          cmd($r_cache, 'npm', 'i', 'axios', 'bootstrap', 'formik', 'mobx', 'mobx-react', 'react-bootstrap', 'react-router-dom');
 
-      my $write = sub {
-          my ($file, $str) = @_;
-          
-          if (! -f $file) {
-              my $fh = IO::File->new($file, "w");
-      
-              print $fh $str;
+          update_file($r_cache, 'src', 'App.js');
 
-              $fh->close();
-          }
-          $ok->(-f $file, "File '$file' created");
-      };
-      
-      $write->(File::Spec->catfile('src', 'App.js'), <<'END');
-import React from "react";
-import { Router, Route } from "react-router-dom";
-import "./App.css";
-import { createBrowserHistory as createHistory } from "history";
-import HomePage from "./HomePage";
-import { ConversionsStore } from "./store";
-import TopBar from "./TopBar";
-const conversionsStore = new ConversionsStore();
-const history = createHistory();
-function App() {
-  return (
-    <div className="App">
-      <TopBar />
-      <Router history={history}>
-        <Route
-          path="/"
-          exact
-          component={props => (
-            <HomePage {...props} conversionsStore={conversionsStore} />
-          )}
-        />
-      </Router>
-    </div>
-  );
-}
-export default App;
-END
+          update_file($r_cache, 'src', 'App.css');
 
-      $write->(File::Spec->catfile('src', 'App.css'), <<'END');
-.page {
-  padding: 20px;
-}
-.button {
-  margin-right: 10px;
-}
-END
+          update_file($r_cache, 'src', 'HomePage.js');
 
-      $write->(File::Spec->catfile('src', 'HomePage.js'), <<'END');
-import React from "react";
-import Table from "react-bootstrap/Table";
-import Button from "react-bootstrap/Button";
-import ButtonToolbar from "react-bootstrap/ButtonToolbar";
-import { observer } from "mobx-react";
-import {
-  getJobs,
-  addJob,
-  deleteJob,
-  cancel,
-  startJob,
-  APIURL
-} from "./request";
-import { Formik } from "formik";
-import Form from "react-bootstrap/Form";
-import Col from "react-bootstrap/Col";
-function HomePage({ conversionsStore }) {
-  const fileRef = React.createRef();
-  const [file, setFile] = React.useState(null);
-  const [fileName, setFileName] = React.useState("");
-  const [initialized, setInitialized] = React.useState(false);
-  const onChange = event => {
-    setFile(event.target.files[0]);
-    setFileName(event.target.files[0].name);
-  };
-  const openFileDialog = () => {
-    fileRef.current.click();
-  };
-  const handleSubmit = async evt => {
-    if (!file) {
-      return;
-    }
-    let bodyFormData = new FormData();
-    bodyFormData.set("outputFormat", evt.outputFormat);
-    bodyFormData.append("video", file);
-    await addJob(bodyFormData);
-    getConversionJobs();
-  };
-  const getConversionJobs = async () => {
-    const response = await getJobs();
-    conversionsStore.setConversions(response.data);
-  };
-  const deleteConversionJob = async id => {
-    await deleteJob(id);
-    getConversionJobs();
-  };
-  const cancelConversionJob = async id => {
-    await cancel(id);
-    getConversionJobs();
-  };
-  const startConversionJob = async id => {
-    await startJob(id);
-    getConversionJobs();
-  };
-  React.useEffect(() => {
-    if (!initialized) {
-      getConversionJobs();
-      setInitialized(true);
-    }
-  }, [initialized, getConversionJobs]);
-  return (
-    <div className="page">
-      <h1 className="text-center">Convert Video</h1>
-      <Formik onSubmit={handleSubmit} initialValues={{ outputFormat: "mp4" }}>
-        {({
-          handleSubmit,
-          handleChange,
-          handleBlur,
-          values,
-          touched,
-          isInvalid,
-          errors
-        }) => (
-          <Form noValidate onSubmit={handleSubmit}>
-            <Form.Row>
-              <Form.Group
-                as={Col}
-                md="12"
-                controlId="outputFormat"
-                defaultValue="mp4"
-              >
-                <Form.Label>Output Format</Form.Label>
-                <Form.Control
-                  as="select"
-                  value={values.outputFormat || "mp4"}
-                  onChange={handleChange}
-                  isInvalid={touched.outputFormat && errors.outputFormat}
-                >
-                  <option value="mov">mov</option>
-                  <option value="webm">webm</option>
-                  <option value="mp4">mp4</option>
-                  <option value="mpeg">mpeg</option>
-                  <option value="3gp">3gp</option>
-                </Form.Control>
-                <Form.Control.Feedback type="invalid">
-                  {errors.outputFormat}
-                </Form.Control.Feedback>
-              </Form.Group>
-            </Form.Row>
-            <Form.Row>
-              <Form.Group as={Col} md="12" controlId="video">
-                <input
-                  type="file"
-                  style={{ display: "none" }}
-                  ref={fileRef}
-                  onChange={onChange}
-                  name="video"
-                />
-                <ButtonToolbar>
-                  <Button
-                    className="button"
-                    onClick={openFileDialog}
-                    type="button"
-                  >
-                    Upload
-                  </Button>
-                  <span>{fileName}</span>
-                </ButtonToolbar>
-              </Form.Group>
-            </Form.Row>
-            <Button type="submit">Add Job</Button>
-          </Form>
-        )}
-      </Formik>
-      <br />
-      <Table>
-        <thead>
-          <tr>
-            <th>File Name</th>
-            <th>Converted File</th>
-            <th>Output Format</th>
-            <th>Status</th>
-            <th>Start</th>
-            <th>Cancel</th>
-            <th>Delete</th>
-          </tr>
-        </thead>
-        <tbody>
-          {conversionsStore.conversions.map(c => {
-            return (
-              <tr>
-                <td>{c.filePath}</td>
-                <td>{c.status}</td>
-                <td>{c.outputFormat}</td>
-                <td>
-                  {c.convertedFilePath ? (
-                    <a href={`${APIURL}/${c.convertedFilePath}`}>Open</a>
-                  ) : (
-                    "Not Available"
-                  )}
-                </td>
-                <td>
-                  <Button
-                    className="button"
-                    type="button"
-                    onClick={startConversionJob.bind(this, c.id)}
-                  >
-                    Start
-                  </Button>
-                </td>
-                <td>
-                  <Button
-                    className="button"
-                    type="button"
-                    onClick={cancelConversionJob.bind(this, c.id)}
-                  >
-                    Cancel
-                  </Button>
-                </td>
-                <td>
-                  <Button
-                    className="button"
-                    type="button"
-                    onClick={deleteConversionJob.bind(this, c.id)}
-                  >
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </Table>
-    </div>
-  );
-}
-export default observer(HomePage);
-END
+          update_file($r_cache, 'src', 'request.js');
 
+          update_file($r_cache, 'src', 'TopBar.js');
 
-      $write->(File::Spec->catfile('src', 'request.js'), <<'END');
-const axios = require("axios");
-export const APIURL = "http://localhost:3000";
-export const getJobs = () => axios.get(`${APIURL}/conversions`);
-export const addJob = data =>
-  axios({
-    method: "post",
-    url: `${APIURL}/conversions`,
-    data,
-    config: { headers: { "Content-Type": "multipart/form-data" } }
-  });
-export const cancel = id => axios.put(`${APIURL}/conversions/cancel/${id}`, {});
-export const deleteJob = id =>
-  axios.delete(`${APIURL}/conversions/${id}`);
-export const startJob = id => axios.get(`${APIURL}/conversions/start/${id}`);
-END
+          update_file($r_cache, 'public', 'index.html');
 
-      $write->(File::Spec->catfile('src', 'store.js'), <<'END');
-import { observable, action, makeObservable } from "mobx";
-class ConversionsStore {
-    conversions = [];
+          cmd($r_cache, 'npm', 'i', '-g', 'nodemon');
+        }
+    };
     
-    constructor() {
-        makeObservable(this, {
-            conversions: observable,
-            setConversions: action
-        })
-    }
-    
-    setConversions(conversions) {
-        this.conversions = conversions;
-    }
-}
-export { ConversionsStore };
-END
+    store($r_cache, $cache_file);
 
-      $write->(File::Spec->catfile('src', 'TopBar.js'), <<'END');
-import React from "react";
-import Navbar from "react-bootstrap/Navbar";
-import Nav from "react-bootstrap/Nav";
-function TopBar() {
-  return (
-    <Navbar bg="primary" expand="lg" variant="dark">
-      <Navbar.Brand href="#home">Video Converter</Navbar.Brand>
-      <Navbar.Toggle aria-controls="basic-navbar-nav" />
-      <Navbar.Collapse id="basic-navbar-nav">
-        <Nav className="mr-auto">
-          <Nav.Link href="/">Home</Nav.Link>
-        </Nav>
-      </Navbar.Collapse>
-    </Navbar>
-  );
-}
-export default TopBar;
-END
-
-      $write->(File::Spec->catfile('public', 'index.html'), <<'END');
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta
-      name="description"
-      content="Web site created using create-react-app"
-    />
-    <link rel="apple-touch-icon" href="logo192.png" />
-    <!--
-      manifest.json provides metadata used when your web app is installed on a
-      user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
-    -->
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
-    <!--
-      Notice the use of %PUBLIC_URL% in the tags above.
-      It will be replaced with the URL of the `public` folder during the build.
-      Only files inside the `public` folder can be referenced from the HTML.
-Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
-      work correctly both with client-side routing and a non-root public URL.
-      Learn how to configure a non-root public URL by running `npm run build`.
-    -->
-    <title>Video Converter</title>
-    <link
-      rel="stylesheet"
-      href="https://maxcdn.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css"
-      integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T"
-      crossorigin="anonymous"
-    />
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-    <!--
-      This HTML file is a template.
-      If you open it directly in the browser, you will see an empty page.
-You can add webfonts, meta tags, or analytics to this file.
-      The build step will place the bundled scripts into the <body> tag.
-To begin the development, run `npm start` or `yarn start`.
-      To create a production bundle, use `npm run build` or `yarn build`.
-    -->
-  </body>
-</html>
-END
-
-      $cmd->('npm', 'i', '-g', 'nodemon');
-    }
+    die $@
+        if $@;
 }
 
 sub execute ($$$) {
@@ -990,6 +430,52 @@ sub check_status ($$) {
         }
     }
 }
+
+sub cmd ($@) {
+    my ($r_cache, @cmd) = @_;
+        
+    if (!exists($r_cache->{'cmd'}{"@cmd"})) {
+        eval {
+            execute(undef, undef, \@cmd);
+        };
+        BAIL_OUT("Can not run '@cmd': $@")
+            if ($@);
+        $r_cache->{'cmd'}{"@cmd"} = 1;
+    }
+    ok(1, "Command '@cmd' executed");
+}
+
+sub update_file ($$$;$) {
+    my $r_cache = shift @_;
+    my ($dir, $dst_basename, $tpl_basename) = @_;
+    my $current_dir = basename(getcwd());
+    my $tpl_file = File::Spec->catfile('..', 'tpl', $current_dir, $dir, (defined($tpl_basename) ? $tpl_basename : $dst_basename));
+    my $dst_file = File::Spec->catfile($dir, $dst_basename);
+
+    die "Template file ($tpl_file) does not exist"
+        unless -f $tpl_file;
+    
+    # cache does not exists or destination does not exist or older than template?
+    if (!exists($r_cache->{'file'}{$dst_file}) ||
+        ! -f $dst_file ||
+        (stat($dst_file))[9] < (stat($tpl_file))[9]) {
+        copy($tpl_file, $dst_file);
+        $r_cache->{'file'}{$dst_file} = 1;
+    }
+    ok(-f $dst_file, "File '$dst_file' created");
+}      
+
+sub create_directory ($$) {
+    my ($r_cache, $dir) = @_;
+
+    if (!(exists($r_cache->{'dir'}{$dir}) && -d $dir)) {
+        mkdir($dir)
+            unless -d $dir;
+        $r_cache->{'dir'}{$dir} = 1;
+    }
+    ok(-d $dir, "Directory '$dir' exists");
+}
+
 
 sub debug (@) {
     print STDERR "@_\n"
