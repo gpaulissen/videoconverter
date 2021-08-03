@@ -363,6 +363,8 @@ sub setup_frontend () {
           update_file($r_cache, 'src', 'HomePage.js');
 
           update_file($r_cache, 'src', 'request.js');
+          
+          update_file($r_cache, 'src', 'store.js');
 
           update_file($r_cache, 'src', 'TopBar.js');
 
